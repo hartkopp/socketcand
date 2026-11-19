@@ -31,7 +31,7 @@ rx_step "CC SFF id 7FF"                 "7FF#DEADBEEF"             "7FF#DEADBEEF
 rx_step "CC EFF id 00000123"            "00000123#11223344"        "00000123#11223344"
 rx_step "CC EFF id 1FFFFFFF len 8"      "1FFFFFFF#0102030405060708" "1FFFFFFF#0102030405060708"
 rx_step "CC EFF len 0"                  "12345678#"                "12345678#"
-# len8_dlc shares the byte with canfd_frame.flags - must still be a < frame >
+# len8_dlc is located at canfd_frame.__res1 - must still be a < frame >
 rx_step "CC len 8 with len8_dlc 9"      "123#1122334455667788_9"   "123#1122334455667788"
 rx_step "CC len 8 with len8_dlc F"      "123#1122334455667788_F"   "123#1122334455667788"
 rx_step "CC RTR (not implemented in socketcand)" "123#R"           "-"
