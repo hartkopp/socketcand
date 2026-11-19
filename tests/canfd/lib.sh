@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
 # shellcheck shell=bash
 #
-# Common helpers for the socketcand CAN CC / CAN FD raw mode tests.
+# Common helpers for the socketcand raw mode tests on vcan interfaces.
 #
 # The tests run as a normal user. The vcan interfaces have to be created
-# once by root (see README.md). The client side uses bash /dev/tcp, so no
-# particular netcat flavour is needed. The bus side uses cansend/candump/cangen
-# from can-utils.
+# once by root (see README.md). The client side uses bash /dev/tcp, the bus
+# side uses cansend/candump/cangen from can-utils.
+#
+# The CAN interface type is derived from the MTU:
+#   16 (CAN_MTU) -> cc, 72 (CANFD_MTU) -> fd, >= 76 (CANXL_MIN_MTU) -> xl
 #
 # Environment variables:
 #   SOCKETCAND        socketcand binary        (default: <top>/build/src/socketcand)
 #   START_SOCKETCAND  1 = start own instance, 0 = use running one (default: 1)
 #   HOST / PORT       socketcand address       (default: 127.0.0.1 / 29536)
+#                     with START_SOCKETCAND=1 the next free port is used
+#                     if PORT is busy or blocked (TIME_WAIT)
 #   LISTEN_IF         socketcand -l interface  (default: lo)
 #   TIMEOUT           seconds to wait for an expected frame (default: 2)
 #   QUIET_TIME        seconds to wait when no frame is expected (default: 0.3)
@@ -41,6 +45,8 @@ SC_PID=
 RX_PID=
 CD_PID=
 CLIENT_OPEN=0
+CAN_IF=
+IF_KIND=
 
 if [ -t 1 ]; then
 	C_R=$'\e[31m' C_G=$'\e[32m' C_Y=$'\e[33m' C_B=$'\e[1m' C_N=$'\e[0m'
@@ -56,9 +62,12 @@ section() { printf '\n%s== %s ==%s\n' "$C_B" "$*" "$C_N"; }
 die()     { printf '%sERROR:%s %s\n' "$C_R" "$C_N" "$*" >&2; FAIL=$((FAIL + 1)); exit 2; }
 
 cleanup() {
+	# close the client first: the client side gets TIME_WAIT, not the
+	# socketcand port
 	client_close
 	bus_stop
 	if [ -n "$SC_PID" ]; then
+		sleep 0.1
 		pkill -P "$SC_PID" 2>/dev/null
 		kill "$SC_PID" 2>/dev/null
 		wait "$SC_PID" 2>/dev/null
@@ -73,8 +82,8 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 summary() {
-	printf '\n%s%s: %d passed, %d failed, %d skipped%s\n' "$C_B" \
-	       "$(basename "$0")" "$PASS" "$FAIL" "$SKIP" "$C_N"
+	printf '\n%s%s %s (%s): %d passed, %d failed, %d skipped%s\n' "$C_B" \
+	       "$(basename "$0")" "$CAN_IF" "$IF_KIND" "$PASS" "$FAIL" "$SKIP" "$C_N"
 	[ "$FAIL" -eq 0 ]
 }
 
@@ -92,43 +101,48 @@ vcan_hint() {
 	cat <<-EOF
 	  Create the interfaces once as root, e.g.:
 	    sudo modprobe vcan
-	    sudo ip link add dev vcan0 type vcan
-	    sudo ip link set vcan0 mtu 72 up     # CAN FD capable (CANFD_MTU)
-	    sudo ip link add dev vcan1 type vcan
-	    sudo ip link set vcan1 mtu 16 up     # CAN CC only (CAN_MTU)
-	  The MTU can only be changed while the interface is down:
-	    sudo ip link set $1 down && sudo ip link set $1 mtu ${2} up
+	    sudo ip link add dev vcan0 type vcan && sudo ip link set vcan0 mtu 16 up     # CAN CC
+	    sudo ip link add dev vcan1 type vcan && sudo ip link set vcan1 mtu 72 up     # CAN FD
+	    sudo ip link add dev vcan2 type vcan && sudo ip link set vcan2 mtu 2060 up   # CAN XL
 	EOF
 }
 
-# iface_check <iface> fd|cc  - returns 1 (with hint) if not usable
-iface_check() {
-	local ifc=$1 mode=$2 mtu flags want
-	[ "$mode" = fd ] && want=72 || want=16
-	if [ ! -e "/sys/class/net/$ifc" ]; then
-		printf 'interface %s does not exist\n' "$ifc"
-		vcan_hint "$ifc" "$want"
-		return 1
-	fi
-	mtu=$(cat "/sys/class/net/$ifc/mtu")
+# iface_kind <iface> -> cc | fd | xl | missing | down | mtu<N>
+iface_kind() {
+	local ifc=$1 mtu flags
+	[ -e "/sys/class/net/$ifc" ] || { echo missing; return; }
 	flags=$(cat "/sys/class/net/$ifc/flags")
-	if (( (flags & 1) == 0 )); then
-		printf 'interface %s is down\n' "$ifc"
-		vcan_hint "$ifc" "$want"
-		return 1
+	(( (flags & 1) == 0 )) && { echo down; return; }
+	mtu=$(cat "/sys/class/net/$ifc/mtu")
+	if [ "$mtu" -eq 16 ]; then
+		echo cc
+	elif [ "$mtu" -eq 72 ]; then
+		echo fd
+	elif [ "$mtu" -ge 76 ]; then
+		echo xl
+	else
+		echo "mtu$mtu"
 	fi
-	if [ "$mode" = fd ] && [ "$mtu" -lt 72 ]; then
-		printf 'interface %s has MTU %s - CAN FD needs MTU >= 72\n' "$ifc" "$mtu"
-		vcan_hint "$ifc" "$want"
-		return 1
-	fi
-	if [ "$mode" = cc ] && [ "$mtu" -ne 16 ]; then
-		printf 'interface %s has MTU %s - CAN CC only test needs MTU 16\n' "$ifc" "$mtu"
-		vcan_hint "$ifc" "$want"
-		return 1
-	fi
-	return 0
 }
+
+# need_iface <iface> - sets CAN_IF and IF_KIND or exits
+need_iface() {
+	CAN_IF=$1
+	IF_KIND=$(iface_kind "$CAN_IF")
+	case $IF_KIND in
+	cc|fd|xl)
+		printf '%s%s: %s (%s)%s\n' "$C_B" "$(basename "$0")" "$CAN_IF" "$IF_KIND" "$C_N"
+		;;
+	*)
+		printf 'CAN interface %s not usable: %s\n' "$CAN_IF" "$IF_KIND"
+		vcan_hint
+		exit 2
+		;;
+	esac
+}
+
+has_fd() { [ "$IF_KIND" = fd ] || [ "$IF_KIND" = xl ]; }
+has_xl() { [ "$IF_KIND" = xl ]; }
 
 # ---------------------------------------------------------------------------
 # socketcand
@@ -139,7 +153,7 @@ port_open() {
 
 # start_socketcand <ifaces> [extra socketcand options]
 start_socketcand() {
-	local ifaces=$1 i
+	local ifaces=$1 try i
 	shift
 	if [ "$START_SOCKETCAND" != 1 ]; then
 		info "using already running socketcand at $HOST:$PORT (must provide $ifaces)"
@@ -147,16 +161,33 @@ start_socketcand() {
 		return 0
 	fi
 	[ -x "$SOCKETCAND" ] || die "socketcand binary not found: $SOCKETCAND (meson setup build && ninja -C build, or set SOCKETCAND=/path/to/socketcand)"
-	port_open && die "port $PORT is already in use - use PORT=<other port> or START_SOCKETCAND=0"
 
-	"$SOCKETCAND" -v -n -l "$LISTEN_IF" -p "$PORT" -i "$ifaces" "$@" >"$SC_LOG" 2>&1 &
-	SC_PID=$!
-	for i in $(seq 50); do
-		port_open && return 0
-		kill -0 "$SC_PID" 2>/dev/null || die "socketcand exited: $(tail -n 5 "$SC_LOG")"
-		sleep 0.1
+	for ((try = 0; try < 20; try++, PORT++)); do
+		if port_open; then
+			info "port $PORT already in use - trying $((PORT + 1))"
+			continue
+		fi
+		"$SOCKETCAND" -v -n -l "$LISTEN_IF" -p "$PORT" -i "$ifaces" "$@" >"$SC_LOG" 2>&1 &
+		SC_PID=$!
+		for i in $(seq 50); do
+			if port_open; then
+				info "socketcand -i $ifaces $* listens on $HOST:$PORT"
+				return 0
+			fi
+			kill -0 "$SC_PID" 2>/dev/null || break
+			sleep 0.1
+		done
+		kill -0 "$SC_PID" 2>/dev/null && die "socketcand does not listen on $HOST:$PORT"
+		wait "$SC_PID" 2>/dev/null
+		SC_PID=
+		if grep -q "Address already in use" "$SC_LOG"; then
+			# socketcand does not set SO_REUSEADDR (only with -DDEBUG)
+			info "port $PORT blocked (bind: Address already in use, e.g. TIME_WAIT) - trying $((PORT + 1))"
+			continue
+		fi
+		die "socketcand exited:"$'\n'"$(cat "$SC_LOG")"
 	done
-	die "socketcand does not listen on $HOST:$PORT"
+	die "no usable TCP port found"
 }
 
 # ---------------------------------------------------------------------------
@@ -174,12 +205,12 @@ expect_reply() {
 	[ "${words[*]}" = "< $1" ] || die "unexpected reply '$msg>' (expected '< $1 >')"
 }
 
-# client_open <iface>  - connect, open bus, switch to raw mode, start capture
+# client_open - connect, open $CAN_IF, switch to raw mode, start capture
 client_open() {
 	exec 3<>"/dev/tcp/$HOST/$PORT" || die "cannot connect to $HOST:$PORT"
 	CLIENT_OPEN=1
 	expect_reply hi
-	client_send "< open $1 >"
+	client_send "< open $CAN_IF >"
 	expect_reply ok
 	client_send "< rawmode >"
 	expect_reply ok
@@ -224,9 +255,9 @@ sc_norm() {
 bus_start() {
 	: >"$BUS_LOG"
 	if command -v stdbuf >/dev/null; then
-		stdbuf -oL candump -L "$1" >"$BUS_LOG" 2>&1 &
+		stdbuf -oL candump -L "$CAN_IF" >"$BUS_LOG" 2>&1 &
 	else
-		candump -L "$1" >"$BUS_LOG" 2>&1 &
+		candump -L "$CAN_IF" >"$BUS_LOG" 2>&1 &
 	fi
 	CD_PID=$!
 	sleep 0.3
@@ -240,13 +271,14 @@ bus_stop() {
 	fi
 }
 
-# Normalize candump -L output: keep the frame column, reduce the CAN FD flags
-# nibble to BRS/ESI (newer kernels also set CANFD_FDF), drop the CC len8_dlc
-# suffix. CAN XL frames are marked with "XL:".
+# Normalize candump -L output:
+#   CAN CC  123#1122 / 123#R / 123#1122334455667788_9 -> drop _<dlc>
+#   CAN FD  123##<flags>DATA  -> flags reduced to BRS/ESI (candump adds FDF)
+#   CAN XL  VVPPP#FF:SS:AAAAAAAA#DATA -> "XL:" prefix
 bus_norm() {
 	awk '{
 		f = $3
-		if (f ~ /###/) { print "XL:" f; next }
+		if (f ~ /:/) { print "XL:" f; next }
 		if (f ~ /##/) {
 			i = index(f, "##")
 			v = index("0123456789ABCDEF", toupper(substr(f, i + 2, 1))) - 1
@@ -276,8 +308,8 @@ wait_lines() {
 rx_step() {
 	local desc=$1 frame=$2 exp=$3 before got
 	before=$(sc_norm | wc -l)
-	if ! cansend "$CAN_IF" "$frame" 2>"$WORK/cansend.err"; then
-		fail "$desc: 'cansend $CAN_IF $frame' failed: $(cat "$WORK/cansend.err")"
+	if ! cansend "$CAN_IF" "$frame" >"$WORK/cansend.err" 2>&1; then
+		fail "$desc: 'cansend $CAN_IF ${frame:0:60}' failed: $(head -n 1 "$WORK/cansend.err")"
 		return
 	fi
 	if [ "$exp" = - ]; then
@@ -286,7 +318,7 @@ rx_step() {
 		if [ -z "$got" ]; then
 			pass "$desc (nothing forwarded)"
 		else
-			fail "$desc: cansend $frame -> unexpected '$got'"
+			fail "$desc: cansend ${frame:0:60} -> unexpected '${got:0:100}'"
 		fi
 		return
 	fi
@@ -341,7 +373,7 @@ client_alive() {
 
 # hex_cat <n> [start] -> "0001020304..." (uppercase, no spaces)
 hex_cat() {
-	local n=$1 s=${2:-0} i out=
+	local n=$1 s=${2:-0} i out=''
 	for ((i = 0; i < n; i++)); do
 		printf -v out '%s%02X' "$out" $(((s + i) & 255))
 	done
@@ -350,7 +382,7 @@ hex_cat() {
 
 # hex_sp <n> [start] -> "00 01 02 03 ..." (lowercase, spaces)
 hex_sp() {
-	local n=$1 s=${2:-0} i out=
+	local n=$1 s=${2:-0} i out=''
 	for ((i = 0; i < n; i++)); do
 		printf -v out '%s %02x' "$out" $(((s + i) & 255))
 	done
@@ -371,7 +403,12 @@ fd_padlen() {
 
 # zeros <n> -> "0000..." (n bytes)
 zeros() {
-	local i out=
+	local i out=''
 	for ((i = 0; i < $1; i++)); do out+='00'; done
 	printf '%s' "$out"
+}
+
+# xl_frame <vcid> <prio> <flags> <sdt> <af> <len> -> cansend CAN XL frame
+xl_frame() {
+	printf '%02X%03X#%02X:%02X:%08X#%s' "$1" "$2" "$3" "$4" "$5" "$(hex_cat "$6")"
 }

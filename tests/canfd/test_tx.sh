@@ -3,20 +3,21 @@
 #
 # socketcand client -> CAN bus (raw mode)
 #
+# usage: test_tx.sh [vcanX]   (default: vcan1)
+#
 # '< send >' and '< fdsend >' commands are sent over TCP and the frames on the
-# CAN FD capable interface are checked with candump. Invalid commands must not
-# put anything on the bus and must not terminate the connection.
+# CAN interface are checked with candump. Invalid commands must not put
+# anything on the bus and must not terminate the connection. On a CAN CC only
+# interface '< fdsend >' has to be rejected.
 
 . "$(dirname "$0")/lib.sh"
 
-CAN_IF=${CAN_IF:-vcan0}
-
 need_tools candump
-iface_check "$CAN_IF" fd || exit 2
+need_iface "${1:-vcan1}"
 
 start_socketcand "$CAN_IF"
-bus_start "$CAN_IF"
-client_open "$CAN_IF"
+bus_start
+client_open
 
 section "CAN CC: client -> $CAN_IF (< send >)"
 tx_step "CC SFF len 0"              "< send 123 0 >"                          "123#"
@@ -33,49 +34,66 @@ tx_step "CC len 9"                  "< send 123 9 $(hex_sp 9) >"              "-
 tx_step "CC too few data bytes"     "< send 123 3 11 22 >"                    "-"
 client_alive
 
-section "CAN FD: client -> $CAN_IF (< fdsend >)"
-tx_step "FD SFF len 0"              "< fdsend 123 00 0 >"                     "123##0"
-tx_step "FD SFF len 1"              "< fdsend 123 00 1 11 >"                  "123##011"
-tx_step "FD SFF len 2 (stays FD)"   "< fdsend 123 00 2 11 22 >"               "123##01122"
-for l in 8 12 16 20 24 32 48 64; do
-	tx_step "FD SFF len $l"     "< fdsend 123 00 $l $(hex_sp "$l") >"     "123##0$(hex_cat "$l")"
-done
-tx_step "FD flags BRS"              "< fdsend 123 01 8 $(hex_sp 8 16) >"      "123##1$(hex_cat 8 16)"
-tx_step "FD flags ESI"              "< fdsend 123 02 8 $(hex_sp 8 16) >"      "123##2$(hex_cat 8 16)"
-tx_step "FD flags BRS+ESI"          "< fdsend 123 03 8 $(hex_sp 8 16) >"      "123##3$(hex_cat 8 16)"
-tx_step "FD flags single digit"     "< fdsend 123 1 1 aa >"                   "123##1AA"
-tx_step "FD EFF 00000123 len 64"    "< fdsend 00000123 01 64 $(hex_sp 64 128) >" "00000123##1$(hex_cat 64 128)"
-tx_step "FD EFF 1FFFFFFF len 64"    "< fdsend 1FFFFFFF 03 64 $(hex_sp 64 200) >" "1FFFFFFF##3$(hex_cat 64 200)"
-tx_step "FD SFF 7FF, uppercase data" "< fdsend 7FF 00 3 AA BB CC >"           "7FF##0AABBCC"
-tx_step "FD EFF len 0"              "< fdsend 1ABCDEF0 01 0 >"                "1ABCDEF0##1"
-tx_step "FD no space before '>'"    "< fdsend 123 00 1 11>"                   "123##011"
+if has_fd; then
+	section "CAN FD: client -> $CAN_IF (< fdsend >)"
+	tx_step "FD SFF len 0"              "< fdsend 123 00 0 >"                     "123##0"
+	tx_step "FD SFF len 1"              "< fdsend 123 00 1 11 >"                  "123##011"
+	tx_step "FD SFF len 2 (stays FD)"   "< fdsend 123 00 2 11 22 >"               "123##01122"
+	for l in 8 12 16 20 24 32 48 64; do
+		tx_step "FD SFF len $l"     "< fdsend 123 00 $l $(hex_sp "$l") >"     "123##0$(hex_cat "$l")"
+	done
+	tx_step "FD flags BRS"              "< fdsend 123 01 8 $(hex_sp 8 16) >"      "123##1$(hex_cat 8 16)"
+	tx_step "FD flags ESI"              "< fdsend 123 02 8 $(hex_sp 8 16) >"      "123##2$(hex_cat 8 16)"
+	tx_step "FD flags BRS+ESI"          "< fdsend 123 03 8 $(hex_sp 8 16) >"      "123##3$(hex_cat 8 16)"
+	tx_step "FD flags single digit"     "< fdsend 123 1 1 aa >"                   "123##1AA"
+	tx_step "FD EFF 00000123 len 64"    "< fdsend 00000123 01 64 $(hex_sp 64 128) >" "00000123##1$(hex_cat 64 128)"
+	tx_step "FD EFF 1FFFFFFF len 64"    "< fdsend 1FFFFFFF 03 64 $(hex_sp 64 200) >" "1FFFFFFF##3$(hex_cat 64 200)"
+	tx_step "FD SFF 7FF, uppercase data" "< fdsend 7FF 00 3 AA BB CC >"           "7FF##0AABBCC"
+	tx_step "FD EFF len 0"              "< fdsend 1ABCDEF0 01 0 >"                "1ABCDEF0##1"
+	tx_step "FD no space before '>'"    "< fdsend 123 00 1 11>"                   "123##011"
 
-section "CAN FD: padding of non-canonical lengths"
-for l in 9 11 13 17 21 25 33 47 49 63; do
-	p=$(fd_padlen "$l")
-	tx_step "FD len $l -> $p"   "< fdsend 123 00 $l $(hex_sp "$l" 1) >"   "123##0$(hex_cat "$l" 1)$(zeros $((p - l)))"
-done
+	section "CAN FD: padding of non-canonical lengths"
+	for l in 9 11 13 17 21 25 33 47 49 63; do
+		p=$(fd_padlen "$l")
+		tx_step "FD len $l -> $p"   "< fdsend 123 00 $l $(hex_sp "$l" 1) >"   "123##0$(hex_cat "$l" 1)$(zeros $((p - l)))"
+	done
 
-section "CAN FD: invalid < fdsend > commands"
-tx_step "FD len 65"                 "< fdsend 123 00 65 $(hex_sp 65) >"       "-"
-tx_step "FD flags 04 (FDF)"         "< fdsend 123 04 1 11 >"                  "-"
-tx_step "FD flags 10"               "< fdsend 123 10 1 11 >"                  "-"
-tx_step "FD SFF id 800 (> 7FF)"     "< fdsend 800 00 1 11 >"                  "-"
-tx_step "FD EFF id 20000000"        "< fdsend 20000000 00 1 11 >"             "-"
-tx_step "FD too few data bytes"     "< fdsend 123 00 3 11 22 >"               "-"
-tx_step "FD too many data bytes"    "< fdsend 123 00 2 11 22 33 >"            "-"
-tx_step "FD missing len"            "< fdsend 123 00 >"                       "-"
-tx_step "FD missing flags and len"  "< fdsend 123 >"                          "-"
-tx_step "FD non-hex data"           "< fdsend 123 00 1 zz >"                  "-"
-client_alive
-tx_step "valid FD frame after invalid ones" "< fdsend 123 01 1 42 >"          "123##142"
+	section "CAN FD: invalid < fdsend > commands"
+	tx_step "FD len 65"                 "< fdsend 123 00 65 $(hex_sp 65) >"       "-"
+	tx_step "FD flags 04 (FDF)"         "< fdsend 123 04 1 11 >"                  "-"
+	tx_step "FD flags 10"               "< fdsend 123 10 1 11 >"                  "-"
+	tx_step "FD SFF id 800 (> 7FF)"     "< fdsend 800 00 1 11 >"                  "-"
+	tx_step "FD EFF id 20000000"        "< fdsend 20000000 00 1 11 >"             "-"
+	tx_step "FD too few data bytes"     "< fdsend 123 00 3 11 22 >"               "-"
+	tx_step "FD too many data bytes"    "< fdsend 123 00 2 11 22 33 >"            "-"
+	tx_step "FD missing len"            "< fdsend 123 00 >"                       "-"
+	tx_step "FD missing flags and len"  "< fdsend 123 >"                          "-"
+	tx_step "FD non-hex data"           "< fdsend 123 00 1 zz >"                  "-"
+	client_alive
+	tx_step "valid FD frame after invalid ones" "< fdsend 123 01 1 42 >"          "123##142"
+else
+	section "CAN FD on CAN CC interface $CAN_IF: < fdsend > must be rejected"
+	tx_step "fdsend len 2"              "< fdsend 123 00 2 11 22 >"               "-"
+	tx_step "fdsend len 64 BRS"         "< fdsend 123 01 64 $(hex_sp 64) >"       "-"
+	client_alive
+	tx_step "CC send still works"       "< send 7FF 1 01 >"                       "7FF#01"
+	if [ "$START_SOCKETCAND" = 1 ]; then
+		if grep -q "CAN FD is not supported" "$SC_LOG"; then
+			pass "socketcand logged 'CAN FD is not supported'"
+		else
+			fail "no 'CAN FD is not supported' message in socketcand log"
+		fi
+	fi
+fi
 
 section "Burst: several commands in one TCP write"
-burst=
+burst=''
 exp=()
 for i in $(seq 0 9); do
-	burst+="< fdsend 2$(printf %02X "$i") 01 64 $(hex_sp 64 "$i") >"
-	exp+=("2$(printf %02X "$i")##1$(hex_cat 64 "$i")")
+	if has_fd; then
+		burst+="< fdsend 2$(printf %02X "$i") 01 64 $(hex_sp 64 "$i") >"
+		exp+=("2$(printf %02X "$i")##1$(hex_cat 64 "$i")")
+	fi
 	burst+="< send 3$(printf %02X "$i") 8 $(hex_sp 8 "$i") >"
 	exp+=("3$(printf %02X "$i")#$(hex_cat 8 "$i")")
 done
@@ -83,9 +101,9 @@ before=$(bus_norm | wc -l)
 client_send "$burst"
 wait_lines bus_norm $((before + ${#exp[@]}))
 if diff <(printf '%s\n' "${exp[@]}") <(bus_norm | tail -n +$((before + 1))) >"$WORK/burst.diff"; then
-	pass "burst of ${#exp[@]} mixed CC/FD commands (${#burst} bytes)"
+	pass "burst of ${#exp[@]} commands (${#burst} bytes)"
 else
-	fail "burst of ${#exp[@]} mixed CC/FD commands, diff expected/bus:"
+	fail "burst of ${#exp[@]} commands, diff expected/bus:"
 	head -n 20 "$WORK/burst.diff"
 fi
 client_alive
