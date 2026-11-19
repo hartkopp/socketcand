@@ -68,12 +68,13 @@ if has_fd; then
 	rx_step "FD after CC"                   "321##1AA"                 "321##1AA"
 	rx_step "CC after FD (len 8)"           "321#0011223344556677"     "321#0011223344556677"
 
-	section "CAN FD with non-canonical length (informational)"
-	# cansend passes len 9 unchanged, vcan does not round it up
-	before=$(sc_norm | wc -l)
-	cansend "$CAN_IF" "456##0$(hex_cat 9)" 2>/dev/null
-	wait_lines sc_norm $((before + 1))
-	info "cansend 456##0$(hex_cat 9) -> '$(sc_norm | sed -n "$((before + 1))p")'"
+	section "CAN FD with 9 data bytes given to cansend"
+	# canfd_frame.len is the payload length in bytes (not the DLC). 9 bytes
+	# can not be expressed by a CAN FD DLC: cansend itself maps the length
+	# to the next valid one (len -> DLC -> len, 9 -> DLC 9 -> 12) and the
+	# remaining bytes are zero. This is not a test of the kernel / vcan.
+	rx_step "FD 9 bytes, rounded up to 12 by cansend" \
+		"456##0$(hex_cat 9)" "456##0$(hex_cat 9)000000"
 else
 	section "CAN FD on CAN CC interface $CAN_IF"
 	skip "CAN FD frames cannot be sent on a CAN CC only interface"
