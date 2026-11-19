@@ -9,7 +9,7 @@
 # from can-utils.
 #
 # Environment variables:
-#   SOCKETCAND        socketcand binary        (default: <top>/build/socketcand)
+#   SOCKETCAND        socketcand binary        (default: <top>/build/src/socketcand)
 #   START_SOCKETCAND  1 = start own instance, 0 = use running one (default: 1)
 #   HOST / PORT       socketcand address       (default: 127.0.0.1 / 29536)
 #   LISTEN_IF         socketcand -l interface  (default: lo)
@@ -20,7 +20,7 @@
 TESTDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TOPDIR=$(cd "$TESTDIR/../.." && pwd)
 
-SOCKETCAND=${SOCKETCAND:-$TOPDIR/build/socketcand}
+SOCKETCAND=${SOCKETCAND:-$TOPDIR/build/src/socketcand}
 START_SOCKETCAND=${START_SOCKETCAND:-1}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-29536}
@@ -146,7 +146,7 @@ start_socketcand() {
 		port_open || die "nothing listens on $HOST:$PORT"
 		return 0
 	fi
-	[ -x "$SOCKETCAND" ] || die "socketcand binary not found: $SOCKETCAND (meson setup build && ninja -C build, or set SOCKETCAND=...)"
+	[ -x "$SOCKETCAND" ] || die "socketcand binary not found: $SOCKETCAND (meson setup build && ninja -C build, or set SOCKETCAND=/path/to/socketcand)"
 	port_open && die "port $PORT is already in use - use PORT=<other port> or START_SOCKETCAND=0"
 
 	"$SOCKETCAND" -v -n -l "$LISTEN_IF" -p "$PORT" -i "$ifaces" "$@" >"$SC_LOG" 2>&1 &

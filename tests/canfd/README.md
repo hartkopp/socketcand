@@ -18,7 +18,7 @@ client uses bash `/dev/tcp`; the CAN side uses `cansend`, `candump` and
     meson setup build && ninja -C build
     tests/canfd/run_all.sh
 
-By default each script starts its own `build/socketcand -n -l lo -p 29536`.
+By default each script starts its own `build/src/socketcand -n -l lo -p 29536`.
 
 | Script            | What it checks                                                        |
 |-------------------|-----------------------------------------------------------------------|
@@ -31,7 +31,7 @@ By default each script starts its own `build/socketcand -n -l lo -p 29536`.
 
 | Variable           | Default                 | Meaning                                  |
 |--------------------|-------------------------|------------------------------------------|
-| `SOCKETCAND`       | `<top>/build/socketcand`| binary to start                          |
+| `SOCKETCAND`       | `<top>/build/src/socketcand` | binary to start                     |
 | `START_SOCKETCAND` | `1`                     | `0` = use an already running instance    |
 | `HOST` / `PORT`    | `127.0.0.1` / `29536`   | socketcand address                       |
 | `LISTEN_IF`        | `lo`                    | `-l` interface of the started instance   |
